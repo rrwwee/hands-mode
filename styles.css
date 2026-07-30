@@ -123,11 +123,49 @@ button:hover:not(:disabled) {
   background: #2d3442;
 }
 
+button:focus-visible {
+  outline: 2px solid #ffda6a;
+  outline-offset: 2px;
+}
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
 }
 
-#copy-diagnostics {
+.danger {
+  border-color: rgba(255, 92, 122, 0.38);
+  color: #ffb5c2;
+}
+
+#copy-diagnostics,
+#reset-calibration {
   grid-column: 1 / -1;
+}
+
+@media (max-width: 480px) {
+  .hud {
+    top: 12px;
+    left: 12px;
+    width: calc(100vw - 24px);
+    padding: 14px;
+  }
+
+  .status {
+    left: 12px;
+    bottom: 12px;
+    max-width: calc(100vw - 24px);
+  }
+
+  dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  dl div {
+    display: block;
+  }
+
+  dd {
+    margin-top: 2px;
+  }
 }

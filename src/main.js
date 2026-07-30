@@ -17,6 +17,7 @@ const captureSampleButton = document.querySelector("#capture-sample");
 const undoSampleButton = document.querySelector("#undo-sample");
 const clearCalibrationButton = document.querySelector("#clear-calibration");
 const copyDiagnosticsButton = document.querySelector("#copy-diagnostics");
+const resetCalibrationButton = document.querySelector("#reset-calibration");
 const ctx = canvas.getContext("2d");
 
 const STORAGE_KEY = "hands-mode.calibration.v2";
@@ -33,6 +34,7 @@ let latestObservation = null;
 let pendingSamples = [];
 let calibrationModel = null;
 let isCalibrating = false;
+let trackingState = "loading";
 
 const calibrationTargets = [
   [0.08, 0.08],
@@ -399,14 +401,19 @@ const predictCalibratedTarget = (observation) => {
 };
 
 const saveCalibration = () => {
-  localStorage.setItem(
-    STORAGE_KEY,
-    JSON.stringify({
-      pendingSamples,
-      model: calibrationModel,
-      savedAt: Date.now(),
-    }),
-  );
+  try {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        pendingSamples,
+        model: calibrationModel,
+        savedAt: Date.now(),
+      }),
+    );
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 const loadCalibration = () => {
@@ -423,6 +430,8 @@ const loadCalibration = () => {
     calibrationModel = null;
   }
 };
+
+const hasCalibrationData = () => Boolean(calibrationModel || pendingSamples.length);
 
 const getAcceptedSampleCount = () => calibrationModel?.sampleCount ?? 0;
 
@@ -441,10 +450,17 @@ const updateCalibrationUi = () => {
   coverageEl.textContent = calibrationModel
     ? `${calibrationModel.coverageCount ?? getCoverageCount(calibrationModel.samples ?? [])}/25`
     : `${getCoverageCount(pendingSamples)}/25`;
-  calibrationToggleButton.textContent = isCalibrating ? "Pause Calibration" : "Resume Calibration";
-  captureSampleButton.disabled = !isCalibrating;
+  calibrationToggleButton.textContent = isCalibrating
+    ? "Pause Calibration"
+    : hasCalibrationData()
+      ? "Resume Calibration"
+      : "Start Calibration";
+  calibrationToggleButton.disabled = trackingState !== "tracking";
+  captureSampleButton.disabled =
+    trackingState !== "tracking" || !isCalibrating || !latestObservation;
   undoSampleButton.disabled = pendingSamples.length === 0;
   clearCalibrationButton.disabled = pendingSamples.length === 0;
+  resetCalibrationButton.disabled = !hasCalibrationData();
 };
 
 const getDiagnostics = () => ({
@@ -475,6 +491,13 @@ const copyDiagnostics = async () => {
 
 const toggleCalibration = () => {
   isCalibrating = !isCalibrating;
+  if (latestObservation) {
+    pointingStateEl.textContent = isCalibrating
+      ? "Calibrating"
+      : calibrationModel
+        ? "Calibrated"
+        : "Geometry";
+  }
   updateCalibrationUi();
   setStatus(
     isCalibrating
@@ -512,27 +535,72 @@ const captureSample = () => {
     pendingSamples = [];
   }
 
-  saveCalibration();
+  const saved = saveCalibration();
   updateCalibrationUi();
   setStatus(
     calibrationModel
-      ? `Captured sample ${calibrationModel.sampleCount}. Model refit and saved.`
-      : `Captured ${pendingSamples.length}. Need ${MIN_SAMPLES_FOR_MODEL} before prediction switches to calibrated.`,
+      ? `Captured sample ${calibrationModel.sampleCount}. Model refit.${
+          saved
+            ? " Calibration saved locally."
+            : " Browser storage is unavailable, so this session was not saved."
+        }`
+      : `Captured ${pendingSamples.length}. Need ${MIN_SAMPLES_FOR_MODEL} before prediction switches to calibrated.${
+          saved ? "" : " Browser storage is unavailable, so this session was not saved."
+        }`,
   );
 };
 
 const undoSample = () => {
   pendingSamples.pop();
-  saveCalibration();
+  const saved = saveCalibration();
   updateCalibrationUi();
-  setStatus("Removed the last pending capture. The active model was unchanged.");
+  setStatus(
+    `Removed the last pending capture. The active model was unchanged.${
+      saved ? "" : " Browser storage is unavailable, so this change was not saved."
+    }`,
+  );
 };
 
-const clearCalibration = () => {
+const clearPendingSamples = () => {
   pendingSamples = [];
-  saveCalibration();
+  const saved = saveCalibration();
   updateCalibrationUi();
-  setStatus("Pending captures cleared. The active model was kept.");
+  setStatus(
+    `Pending captures cleared. The active model was kept.${
+      saved ? "" : " Browser storage is unavailable, so this change was not saved."
+    }`,
+  );
+};
+
+const resetCalibration = () => {
+  const confirmed = window.confirm(
+    "Reset the active model and delete all stored calibration samples? This cannot be undone.",
+  );
+
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    setStatus("Could not remove calibration data because browser storage is unavailable.");
+    return;
+  }
+
+  pendingSamples = [];
+  calibrationModel = null;
+  smoothedPointer = null;
+  isCalibrating = trackingState === "tracking";
+  if (latestObservation) {
+    pointingStateEl.textContent = isCalibrating ? "Calibrating" : "Geometry";
+  }
+  updateCalibrationUi();
+  setStatus(
+    isCalibrating
+      ? "Calibration reset. Point at the pink target and press Space or Capture Sample."
+      : "Calibration reset. Start calibration when the webcam is ready.",
+  );
 };
 
 const drawScreenFrame = (screenRect) => {
@@ -627,6 +695,7 @@ const drawTracking = (results) => {
 
   const hands = results.landmarks ?? [];
   handCountEl.textContent = String(hands.length);
+  const previouslyObservedHand = Boolean(latestObservation);
   latestObservation = observeHand(results);
 
   if (isCalibrating) {
@@ -637,12 +706,22 @@ const drawTracking = (results) => {
     smoothedPointer = null;
     pointingStateEl.textContent = hands.length ? "Unclear" : "No hand";
     confidenceEl.textContent = "0%";
+    if (previouslyObservedHand) {
+      updateCalibrationUi();
+    }
     return;
   }
 
   const pointer = smoothPointer(predictCalibratedTarget(latestObservation));
-  pointingStateEl.textContent = calibrationModel ? "Calibrated" : "Geometry";
+  pointingStateEl.textContent = isCalibrating
+    ? "Calibrating"
+    : calibrationModel
+      ? "Calibrated"
+      : "Geometry";
   confidenceEl.textContent = `${Math.round(pointer.confidence * 100)}%`;
+  if (!previouslyObservedHand) {
+    updateCalibrationUi();
+  }
   drawPointer(pointer, screenRect);
 };
 
@@ -655,7 +734,12 @@ const predict = () => {
     }
   } catch (error) {
     console.error(error);
-    setStatus(`Tracking hiccup: ${error.message}`);
+    trackingState = "error";
+    latestObservation = null;
+    pointingStateEl.textContent = "Error";
+    updateCalibrationUi();
+    setStatus(`Hand tracking stopped: ${error.message}. Reload the page to try again.`);
+    return;
   }
 
   requestAnimationFrame(predict);
@@ -689,14 +773,57 @@ const createHandLandmarker = async (filesetResolver, delegate) =>
     minTrackingConfidence: 0.55,
   });
 
-const init = async () => {
-  try {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error("This browser does not expose webcam access here.");
-    }
+const describeCameraError = (error) => {
+  if (error?.name === "NotAllowedError" || error?.name === "SecurityError") {
+    return {
+      mode: "Camera denied",
+      message:
+        "Webcam access was denied. Allow camera access for this site in your browser settings, then reload.",
+    };
+  }
 
-    loadCalibration();
+  if (error?.name === "NotFoundError" || error?.name === "DevicesNotFoundError") {
+    return {
+      mode: "No camera",
+      message: "No webcam was found. Connect or enable a webcam, then reload.",
+    };
+  }
+
+  if (error?.name === "NotReadableError" || error?.name === "TrackStartError") {
+    return {
+      mode: "Camera busy",
+      message:
+        "The webcam could not be opened. Close other apps using it, check system camera access, then reload.",
+    };
+  }
+
+  return {
+    mode: "Error",
+    message: `Could not start the webcam: ${error?.message || "unknown error"}. Check browser camera access, then reload.`,
+  };
+};
+
+const init = async () => {
+  loadCalibration();
+  updateCalibrationUi();
+
+  if (!navigator.mediaDevices?.getUserMedia) {
+    trackingState = "error";
+    pointingStateEl.textContent = "Unavailable";
     updateCalibrationUi();
+    setStatus(
+      "Webcam access is unavailable here. Use a current desktop browser and open the app from localhost or HTTPS.",
+    );
+    return;
+  }
+
+  try {
+    trackingState = "loading";
+    pointingStateEl.textContent = "Loading";
+    updateCalibrationUi();
+    setStatus(
+      "Loading the hand tracker. Webcam access is needed; frames are processed locally in this browser.",
+    );
 
     const filesetResolver = await FilesetResolver.forVisionTasks(
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm",
@@ -707,20 +834,47 @@ const init = async () => {
     } catch {
       handLandmarker = await createHandLandmarker(filesetResolver, "CPU");
     }
-
-    setStatus(
-      calibrationModel
-        ? `Loaded calibrated model with ${calibrationModel.sampleCount} samples.`
-        : pendingSamples.length
-          ? `Loaded ${pendingSamples.length} pending captures.`
-          : "Geometry pointer ready. Resume calibration to improve it.",
-    );
-    await startCamera();
-    predict();
   } catch (error) {
     console.error(error);
-    setStatus(`Could not start hand tracking: ${error.message}`);
+    trackingState = "error";
+    pointingStateEl.textContent = "Load error";
+    updateCalibrationUi();
+    setStatus(
+      `Could not load the MediaPipe hand tracker: ${error.message}. Check your internet connection, then reload.`,
+    );
+    return;
   }
+
+  trackingState = "requesting-camera";
+  pointingStateEl.textContent = "Awaiting camera";
+  updateCalibrationUi();
+  setStatus(
+    "Webcam access is required to locate your hand. When the browser asks, choose Allow. Frames are processed locally.",
+  );
+
+  try {
+    await startCamera();
+  } catch (error) {
+    console.error(error);
+    const cameraError = describeCameraError(error);
+    trackingState = "error";
+    pointingStateEl.textContent = cameraError.mode;
+    updateCalibrationUi();
+    setStatus(cameraError.message);
+    return;
+  }
+
+  trackingState = "tracking";
+  pointingStateEl.textContent = "No hand";
+  updateCalibrationUi();
+  setStatus(
+    calibrationModel
+      ? `Webcam ready. Loaded a calibrated model with ${calibrationModel.sampleCount} samples. Show one pointing hand.`
+      : pendingSamples.length
+        ? `Webcam ready. Loaded ${pendingSamples.length} pending captures. Resume calibration when ready.`
+        : "Webcam ready. Show one pointing hand, or start calibration to adapt the estimate to this setup.",
+  );
+  predict();
 };
 
 window.addEventListener("resize", resizeCanvas);
@@ -733,6 +887,7 @@ window.addEventListener("keydown", (event) => {
 calibrationToggleButton.addEventListener("click", toggleCalibration);
 captureSampleButton.addEventListener("click", captureSample);
 undoSampleButton.addEventListener("click", undoSample);
-clearCalibrationButton.addEventListener("click", clearCalibration);
+clearCalibrationButton.addEventListener("click", clearPendingSamples);
 copyDiagnosticsButton.addEventListener("click", copyDiagnostics);
+resetCalibrationButton.addEventListener("click", resetCalibration);
 init();
