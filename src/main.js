@@ -4,6 +4,7 @@ import {
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs";
 
 const video = document.querySelector("#webcam");
+const cameraToggleButton = document.querySelector("#camera-toggle");
 const canvas = document.querySelector("#overlay");
 const statusEl = document.querySelector("#status");
 const handCountEl = document.querySelector("#hand-count");
@@ -34,7 +35,9 @@ let latestObservation = null;
 let pendingSamples = [];
 let calibrationModel = null;
 let isCalibrating = false;
-let trackingState = "loading";
+let trackingState = "stopped";
+let cameraSession = 0;
+let animationFrameId = null;
 
 const calibrationTargets = [
   [0.08, 0.08],
@@ -443,6 +446,11 @@ const getCurrentTarget = () =>
   calibrationTargets[(getAcceptedSampleCount() + pendingSamples.length) % calibrationTargets.length];
 
 const updateCalibrationUi = () => {
+  cameraToggleButton.textContent = trackingState === "tracking"
+    ? "Stop Camera"
+    : trackingState === "loading" || trackingState === "requesting-camera"
+      ? "Cancel Camera Start"
+      : "Start Camera";
   if (trackingState === "tracking" && latestObservation) {
     pointingStateEl.textContent = isCalibrating
       ? "Calibrating"
@@ -732,28 +740,69 @@ const drawTracking = (results) => {
   drawPointer(pointer, screenRect);
 };
 
-const predict = () => {
+const stopTracks = (stream) => {
+  for (const track of stream?.getTracks() ?? []) {
+    if (track.readyState !== "ended") track.stop();
+  }
+};
+
+const endCameraSession = (state, mode, message) => {
+  // Retire pending starts and queued frames before releasing their resources.
+  cameraSession += 1;
+  trackingState = state;
+  cancelAnimationFrame(animationFrameId);
+  animationFrameId = null;
+  const stream = video.srcObject;
+  video.srcObject = null;
+  video.pause();
+  stopTracks(stream);
+  const detector = handLandmarker;
+  handLandmarker = null;
+  try {
+    detector?.close();
+  } catch (error) {
+    console.error(error);
+  }
+  lastVideoTime = -1;
+  isCalibrating = false;
+  clearPointer(mode);
+  handCountEl.textContent = "0";
+  updateCalibrationUi();
+  setStatus(message);
+  try {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  } catch (error) {
+    console.error(error);
+  }
+};
+
+const stopCamera = () => {
+  const pending = trackingState === "loading" || trackingState === "requesting-camera";
+  endCameraSession("stopped", "Camera stopped", pending
+    ? "Camera start cancelled. Any pending camera request will be released if it completes. Calibration kept."
+    : "Camera stopped. This app has released its camera stream. Calibration kept.");
+};
+
+const predict = (session = cameraSession) => {
+  if (session !== cameraSession || trackingState !== "tracking") return;
   try {
     if (video.currentTime !== lastVideoTime) {
       lastVideoTime = video.currentTime;
       const results = handLandmarker.detectForVideo(video, performance.now());
+      if (session !== cameraSession) return;
       drawTracking(results);
     }
   } catch (error) {
     console.error(error);
-    trackingState = "error";
-    clearPointer("Error");
-    handCountEl.textContent = "0";
-    updateCalibrationUi();
-    setStatus(`Hand tracking stopped: ${error.message}. Reload the page to try again.`);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (session !== cameraSession) return;
+    endCameraSession("error", "Error", `Hand tracking stopped: ${error.message}. Select Start Camera to try again.`);
     return;
   }
 
-  requestAnimationFrame(predict);
+  animationFrameId = requestAnimationFrame(() => predict(session));
 };
 
-const startCamera = async () => {
+const startCamera = async (session) => {
   const stream = await navigator.mediaDevices.getUserMedia({
     video: {
       width: { ideal: 1280 },
@@ -763,8 +812,24 @@ const startCamera = async () => {
     audio: false,
   });
 
+  if (session !== cameraSession) {
+    stopTracks(stream);
+    return false;
+  }
   video.srcObject = stream;
+  for (const track of stream.getTracks()) {
+    track.addEventListener("ended", () => {
+      if (session === cameraSession) {
+        endCameraSession("stopped", "Camera stopped", "Camera stream ended. Select Start Camera to reconnect. Calibration kept.");
+      }
+    }, { once: true });
+  }
   await video.play();
+  if (session !== cameraSession) {
+    stopTracks(stream);
+    return false;
+  }
+  return true;
 };
 
 const createHandLandmarker = async (filesetResolver, delegate) =>
@@ -786,14 +851,14 @@ const describeCameraError = (error) => {
     return {
       mode: "Camera denied",
       message:
-        "Webcam access was denied. Allow camera access for this site in your browser settings, then reload.",
+        "Webcam access was denied. Allow camera access for this site in your browser settings, then select Start Camera.",
     };
   }
 
   if (error?.name === "NotFoundError" || error?.name === "DevicesNotFoundError") {
     return {
       mode: "No camera",
-      message: "No webcam was found. Connect or enable a webcam, then reload.",
+      message: "No webcam was found. Connect or enable a webcam, then select Start Camera.",
     };
   }
 
@@ -801,19 +866,19 @@ const describeCameraError = (error) => {
     return {
       mode: "Camera busy",
       message:
-        "The webcam could not be opened. Close other apps using it, check system camera access, then reload.",
+        "The webcam could not be opened. Close other apps using it, check system camera access, then select Start Camera.",
     };
   }
 
   return {
     mode: "Error",
-    message: `Could not start the webcam: ${error?.message || "unknown error"}. Check browser camera access, then reload.`,
+    message: `Could not start the webcam: ${error?.message || "unknown error"}. Check browser camera access, then select Start Camera.`,
   };
 };
 
-const init = async () => {
-  loadCalibration();
-  updateCalibrationUi();
+const startTracking = async () => {
+  if (trackingState !== "stopped" && trackingState !== "error") return;
+  const session = ++cameraSession;
 
   if (!navigator.mediaDevices?.getUserMedia) {
     trackingState = "error";
@@ -836,20 +901,24 @@ const init = async () => {
     const filesetResolver = await FilesetResolver.forVisionTasks(
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm",
     );
+    if (session !== cameraSession) return;
 
+    let detector;
     try {
-      handLandmarker = await createHandLandmarker(filesetResolver, "GPU");
+      detector = await createHandLandmarker(filesetResolver, "GPU");
     } catch {
-      handLandmarker = await createHandLandmarker(filesetResolver, "CPU");
+      if (session !== cameraSession) return;
+      detector = await createHandLandmarker(filesetResolver, "CPU");
     }
+    if (session !== cameraSession) {
+      detector.close();
+      return;
+    }
+    handLandmarker = detector;
   } catch (error) {
+    if (session !== cameraSession) return;
     console.error(error);
-    trackingState = "error";
-    pointingStateEl.textContent = "Load error";
-    updateCalibrationUi();
-    setStatus(
-      `Could not load the MediaPipe hand tracker: ${error.message}. Check your internet connection, then reload.`,
-    );
+    endCameraSession("error", "Load error", `Could not load the MediaPipe hand tracker: ${error.message}. Check your internet connection, then select Start Camera.`);
     return;
   }
 
@@ -861,14 +930,12 @@ const init = async () => {
   );
 
   try {
-    await startCamera();
+    if (!await startCamera(session)) return;
   } catch (error) {
+    if (session !== cameraSession) return;
     console.error(error);
     const cameraError = describeCameraError(error);
-    trackingState = "error";
-    pointingStateEl.textContent = cameraError.mode;
-    updateCalibrationUi();
-    setStatus(cameraError.message);
+    endCameraSession("error", cameraError.mode, cameraError.message);
     return;
   }
 
@@ -882,9 +949,22 @@ const init = async () => {
         ? `Webcam ready. Loaded ${pendingSamples.length} pending captures. Resume calibration when ready.`
         : "Webcam ready. Show one pointing hand, or start calibration to adapt the estimate to this setup.",
   );
-  predict();
+  predict(session);
 };
 
+const init = () => {
+  loadCalibration();
+  return startTracking();
+};
+
+cameraToggleButton.addEventListener("click", () => {
+  if (trackingState === "stopped" || trackingState === "error") {
+    startTracking();
+  } else {
+    stopCamera();
+  }
+});
+window.addEventListener("pagehide", stopCamera);
 window.addEventListener("resize", resizeCanvas);
 window.addEventListener("keydown", (event) => {
   if (

@@ -144,6 +144,7 @@ button:disabled {
 }
 
 #copy-diagnostics,
+#camera-toggle,
 #reset-calibration {
   grid-column: 1 / -1;
 }
