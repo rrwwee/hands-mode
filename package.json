@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "check": "node --check src/main.js && node --check scripts/check-git-snapshot.mjs && node --check playwright.config.mjs && node --check tests/browser/workflow.spec.mjs && npm test"
   },
   "devDependencies": {
     "@playwright/test": "1.64.1"
