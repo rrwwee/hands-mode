@@ -75,6 +75,13 @@ Starting or resuming calibration focuses the pointing area. Space captures one
 sample per press there. Use Tab to reach the controls; while a button has focus,
 Space activates that button instead of capturing a sample.
 
+**Pause Calibration** pauses sample capture; the camera and pointer keep running.
+**Stop Camera** releases this app's stream, stops tracking and keeps calibration.
+Use **Start Camera** to restart, including after a tracking or camera error.
+During startup, **Cancel Camera Start** cancels this app's pending start. A browser
+permission prompt may remain open; if its stream arrives later, the app releases
+it without resuming tracking. Leaving the page also releases the active stream.
+
 **Undo Pending** removes only the most recent sample that has not yet been included in a fitted model. **Clear Pending** removes all such pending samples. Neither action changes the active fitted model.
 
 **Reset & Start Over** is the destructive option. After confirmation, it removes the active model and all stored calibration samples, clears the in-memory calibration state and starts a fresh calibration session.

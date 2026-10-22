@@ -23,8 +23,9 @@ async function app(saved) {
     console: { log() {}, error() {} },
     performance: { now: () => 1 },
     requestAnimationFrame() {},
+    cancelAnimationFrame() {},
     navigator: {
-      mediaDevices: { getUserMedia: async () => ({ simulated: true }) },
+      mediaDevices: { getUserMedia: async () => ({ getTracks: () => [] }) },
       clipboard: { writeText: async () => {} },
     },
     localStorage: {
@@ -38,13 +39,14 @@ async function app(saved) {
         if (!elements.has(id)) elements.set(id, {
           clientWidth: 800, clientHeight: 500,
           addEventListener() {}, getContext: () => drawing, focus() {},
-          play: async () => {}, currentTime: 0,
+          play: async () => {}, pause() {}, currentTime: 0,
         });
         return elements.get(id);
       },
     },
     FilesetResolver: { forVisionTasks: async () => ({}) },
     HandLandmarker: { createFromOptions: async () => ({
+      close() {},
       detectForVideo: () => ({ landmarks: [] }),
     }) },
   });
@@ -311,6 +313,9 @@ test("unavailable storage keeps in-memory captures and reports failure", async (
   a.run('localStorage.setItem = () => { throw new Error("storage denied"); }; toggleCalibration(); latestObservation = {feature: input[0].feature}; captureSample()');
   assert.equal(a.run("pendingSamples.length"), 1);
   assert.match(a.elements.get("#status").textContent, /not saved/);
+  a.run("stopCamera()");
+  await a.run("startTracking()");
+  assert.equal(a.run("pendingSamples.length"), 1);
 });
 
 test("cancelled reset and storage failure retain data; confirmed reset clears it", async () => {
