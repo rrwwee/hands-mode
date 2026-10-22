@@ -259,7 +259,8 @@ const observeHand = (results) => {
 
 const solveLinearSystem = (matrix, values) => {
   const size = values.length;
-  const augmented = matrix.map((row, index) => [...row, values[index]]);
+  const augmented = matrix.map((row, index) => [...row, ...values[index]]);
+  const columnCount = augmented[0].length;
 
   for (let column = 0; column < size; column += 1) {
     let pivotRow = column;
@@ -277,7 +278,7 @@ const solveLinearSystem = (matrix, values) => {
     [augmented[column], augmented[pivotRow]] = [augmented[pivotRow], augmented[column]];
 
     const pivot = augmented[column][column];
-    for (let item = column; item <= size; item += 1) {
+    for (let item = column; item < columnCount; item += 1) {
       augmented[column][item] /= pivot;
     }
 
@@ -287,25 +288,26 @@ const solveLinearSystem = (matrix, values) => {
       }
 
       const factor = augmented[row][column];
-      for (let item = column; item <= size; item += 1) {
+      for (let item = column; item < columnCount; item += 1) {
         augmented[row][item] -= factor * augmented[column][item];
       }
     }
   }
 
-  return augmented.map((row) => row[size]);
+  return augmented.map((row) => row.slice(size));
 };
 
-const fitAxis = (samples, axis, weights) => {
+const fitCoordinates = (samples, weights) => {
   const featureCount = samples[0].feature.length;
   const matrix = Array.from({ length: featureCount }, () => Array(featureCount).fill(0));
-  const values = Array(featureCount).fill(0);
+  const values = Array.from({ length: featureCount }, () => [0, 0]);
 
   for (const [sampleIndex, sample] of samples.entries()) {
     const weight = weights?.[sampleIndex] ?? 1;
 
     for (let row = 0; row < featureCount; row += 1) {
-      values[row] += sample.feature[row] * sample.target[axis] * weight;
+      values[row][0] += sample.feature[row] * sample.target.x * weight;
+      values[row][1] += sample.feature[row] * sample.target.y * weight;
 
       for (let column = 0; column < featureCount; column += 1) {
         matrix[row][column] += sample.feature[row] * sample.feature[column] * weight;
@@ -317,7 +319,12 @@ const fitAxis = (samples, axis, weights) => {
     matrix[index][index] += 0.01;
   }
 
-  return solveLinearSystem(matrix, values);
+  // Both coordinates share the same weighted matrix and pivot operations.
+  const coefficients = solveLinearSystem(matrix, values);
+  return {
+    xCoefficients: coefficients.map(([x]) => x),
+    yCoefficients: coefficients.map(([, y]) => y),
+  };
 };
 
 const dot = (left, right) => left.reduce((sum, value, index) => sum + value * right[index], 0);
@@ -356,10 +363,7 @@ const fitModelFromSamples = (samples) => {
   let model = null;
 
   for (let pass = 0; pass < 4; pass += 1) {
-    model = {
-      xCoefficients: fitAxis(samples, "x", weights),
-      yCoefficients: fitAxis(samples, "y", weights),
-    };
+    model = fitCoordinates(samples, weights);
 
     const errors = samples.map((sample) => {
       const prediction = predictWithModel(sample.feature, model);
