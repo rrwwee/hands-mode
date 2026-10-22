@@ -42,7 +42,7 @@ Browser and hardware combinations have not been tested comprehensively.
 With Node.js 22 or later installed, run:
 
 ```sh
-node --test tests/*.test.mjs
+npm run check
 ```
 
 The tests simulate browser APIs and hand observations without using a webcam,
@@ -50,6 +50,18 @@ network connection or GPU. They compare the shared X/Y calibration solve against
 the original independent-axis calculation and exercise capture, refit, reload,
 pending-sample controls and storage failures. They do not measure real-world
 pointing accuracy or replace browser/device testing.
+
+On macOS/Linux, local commits and pushes can use the same offline checks as CI:
+
+```sh
+git config --local core.hooksPath .githooks
+```
+
+Enable this only when no other hooks path is configured; preserve existing hooks.
+The hooks check the staged tree before commit and each outgoing ref tip before
+push in disposable directories, without stashing or changing working files.
+Browser tests stay in CI. To restore Git's default hooks path, unset this local
+setting with `git config --local --unset core.hooksPath`.
 
 To run the real-browser workflow tests with synthetic landmarks:
 
