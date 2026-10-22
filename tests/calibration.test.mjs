@@ -37,7 +37,7 @@ async function app(saved) {
       querySelector: (id) => {
         if (!elements.has(id)) elements.set(id, {
           clientWidth: 800, clientHeight: 500,
-          addEventListener() {}, getContext: () => drawing,
+          addEventListener() {}, getContext: () => drawing, focus() {},
           play: async () => {}, currentTime: 0,
         });
         return elements.get(id);
