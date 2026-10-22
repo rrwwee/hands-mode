@@ -23,6 +23,26 @@ const ctx = canvas.getContext("2d");
 
 const STORAGE_KEY = "hands-mode.calibration.v2";
 const MIN_SAMPLES_FOR_MODEL = 24;
+const FEATURE_COUNT = 22;
+const isFiniteVector = (values, size) =>
+  Array.isArray(values) && values.length === size && [...values].every(Number.isFinite);
+const isValidSample = (sample) =>
+  isFiniteVector(sample?.feature, FEATURE_COUNT) && sample.feature[0] === 1 &&
+  Number.isFinite(sample.target?.x) && Number.isFinite(sample.target?.y);
+const isValidModel = (model) =>
+  isFiniteVector(model?.xCoefficients, FEATURE_COUNT) &&
+  isFiniteVector(model.yCoefficients, FEATURE_COUNT) &&
+  Number.isFinite(Math.hypot(...model.xCoefficients)) &&
+  Number.isFinite(Math.hypot(...model.yCoefficients)) &&
+  Number.isInteger(model.sampleCount) && model.sampleCount >= MIN_SAMPLES_FOR_MODEL &&
+  [model.meanError, model.maxError].every((value) => Number.isFinite(value) && value >= 0) &&
+  [model.medianError, model.xNorm, model.yNorm, model.coverageCount]
+    .every((value) => value === undefined || (Number.isFinite(value) && value >= 0)) &&
+  (model.samples === undefined || (Array.isArray(model.samples) &&
+    model.samples.length === model.sampleCount && model.samples.every(isValidSample)));
+const isValidLandmark = (point) =>
+  Number.isFinite(point?.x) && Number.isFinite(point.y) &&
+  Number.isFinite(point.z === undefined ? 0 : point.z);
 const macbookScreen = {
   aspectWidth: 16,
   aspectHeight: 10,
@@ -159,6 +179,9 @@ const getFingerCurl = (hand) => {
 };
 
 const estimateRawTarget = (hand) => {
+  if (![0, 6, 7, 8, 12, 16, 20].every((index) => isValidLandmark(hand?.[index]))) {
+    return null;
+  }
   const wrist = mirrorPoint(hand[0]);
   const indexPip = mirrorPoint(hand[6]);
   const indexDip = mirrorPoint(hand[7]);
@@ -182,6 +205,8 @@ const estimateRawTarget = (hand) => {
     x: indexTip.x + dirX * extension,
     y: indexTip.y + dirY * extension,
   };
+
+  if (![segmentLength, curl, rayEnd.x, rayEnd.y].every(Number.isFinite)) return null;
 
   return {
     x: clamp(rayEnd.x, 0, 1),
@@ -254,14 +279,18 @@ const observeHand = (results) => {
     return null;
   }
 
-  return {
-    raw,
-    feature: buildFeature(hand, results.worldLandmarks?.[0], raw),
-  };
+  const worldHand = results.worldLandmarks?.[0];
+  if (worldHand && ![7, 8].every((index) => isValidLandmark(worldHand[index]))) return null;
+  const feature = buildFeature(hand, worldHand, raw);
+  return isFiniteVector(feature, FEATURE_COUNT) ? { raw, feature } : null;
 };
 
 const solveLinearSystem = (matrix, values) => {
   const size = values.length;
+  if (!size || matrix.length !== size || !matrix.every((row) => isFiniteVector(row, size)) ||
+      !values.every((row) => isFiniteVector(row, 2))) {
+    throw new Error("Calibration matrix contains invalid values.");
+  }
   const augmented = matrix.map((row, index) => [...row, ...values[index]]);
   const columnCount = augmented[0].length;
 
@@ -274,7 +303,7 @@ const solveLinearSystem = (matrix, values) => {
       }
     }
 
-    if (Math.abs(augmented[pivotRow][column]) < 1e-10) {
+    if (!Number.isFinite(augmented[pivotRow][column]) || Math.abs(augmented[pivotRow][column]) < 1e-10) {
       throw new Error("Calibration matrix is unstable.");
     }
 
@@ -297,7 +326,11 @@ const solveLinearSystem = (matrix, values) => {
     }
   }
 
-  return augmented.map((row) => row.slice(size));
+  const solution = augmented.map((row) => row.slice(size));
+  if (!solution.every((row) => isFiniteVector(row, 2))) {
+    throw new Error("Calibration solution is not finite.");
+  }
+  return solution;
 };
 
 const fitCoordinates = (samples, weights) => {
@@ -349,8 +382,7 @@ const getCoverageCount = (samples) => {
   return coveredTargets.size;
 };
 
-const coefficientNorm = (coefficients) =>
-  Math.hypot(...coefficients.filter((value) => Number.isFinite(value)));
+const coefficientNorm = (coefficients) => Math.hypot(...coefficients);
 
 const predictWithModel = (feature, model) => ({
   x: dot(feature, model.xCoefficients),
@@ -358,7 +390,7 @@ const predictWithModel = (feature, model) => ({
 });
 
 const fitModelFromSamples = (samples) => {
-  if (samples.length < MIN_SAMPLES_FOR_MODEL) {
+  if (!Array.isArray(samples) || samples.length < MIN_SAMPLES_FOR_MODEL || !samples.every(isValidSample)) {
     return null;
   }
 
@@ -366,12 +398,17 @@ const fitModelFromSamples = (samples) => {
   let model = null;
 
   for (let pass = 0; pass < 4; pass += 1) {
-    model = fitCoordinates(samples, weights);
+    try {
+      model = fitCoordinates(samples, weights);
+    } catch {
+      return null;
+    }
 
     const errors = samples.map((sample) => {
       const prediction = predictWithModel(sample.feature, model);
       return Math.hypot(prediction.x - sample.target.x, prediction.y - sample.target.y);
     });
+    if (!errors.every(Number.isFinite)) return null;
     const typicalError = Math.max(median(errors), 0.025);
     weights = errors.map((error) => 1 / (1 + (error / (typicalError * 2)) ** 2));
   }
@@ -381,7 +418,7 @@ const fitModelFromSamples = (samples) => {
     return Math.hypot(prediction.x - sample.target.x, prediction.y - sample.target.y);
   });
 
-  return {
+  const fitted = {
     ...model,
     sampleCount: samples.length,
     meanError: errors.reduce((sum, error) => sum + error, 0) / errors.length,
@@ -391,6 +428,7 @@ const fitModelFromSamples = (samples) => {
     xNorm: coefficientNorm(model.xCoefficients),
     yNorm: coefficientNorm(model.yCoefficients),
   };
+  return isValidModel(fitted) ? fitted : null;
 };
 
 const predictCalibratedTarget = (observation) => {
@@ -399,6 +437,7 @@ const predictCalibratedTarget = (observation) => {
   }
 
   const calibrated = predictWithModel(observation.feature, calibrationModel);
+  if (!Number.isFinite(calibrated.x) || !Number.isFinite(calibrated.y)) return null;
 
   return {
     ...observation.raw,
@@ -426,15 +465,33 @@ const saveCalibration = () => {
 const loadCalibration = () => {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
-    pendingSamples = Array.isArray(saved.pendingSamples)
-      ? saved.pendingSamples
-      : Array.isArray(saved.samples)
-        ? saved.samples
-        : [];
-    calibrationModel = saved.model ?? fitModelFromSamples(pendingSamples);
+    const storedPending = Array.isArray(saved.pendingSamples)
+      ? saved.pendingSamples : Array.isArray(saved.samples) ? saved.samples : [];
+    calibrationModel = isValidModel(saved.model) ? saved.model : null;
+    const retainedSamples = !calibrationModel && Array.isArray(saved.model?.samples)
+      ? saved.model.samples : [];
+    const candidates = [...retainedSamples, ...storedPending];
+    pendingSamples = candidates.filter(isValidSample);
+    let notice = saved.model && !calibrationModel
+      ? "Invalid saved calibration model was rejected. " : "";
+    if (pendingSamples.length !== candidates.length) {
+      notice += "Invalid calibration samples were not loaded. ";
+    }
+    if (!calibrationModel && pendingSamples.length >= MIN_SAMPLES_FOR_MODEL) {
+      const fitted = fitModelFromSamples(pendingSamples);
+      if (fitted) {
+        calibrationModel = { ...fitted, samples: pendingSamples };
+        pendingSamples = [];
+        if (saved.model) notice += "A model was rebuilt from retained valid samples. ";
+      } else {
+        notice += "Saved samples could not produce a finite model. ";
+      }
+    }
+    return notice;
   } catch {
     pendingSamples = [];
     calibrationModel = null;
+    return "Saved calibration could not be read and was not loaded. ";
   }
 };
 
@@ -531,23 +588,24 @@ const captureSample = () => {
     return;
   }
 
-  pendingSamples.push({
+  const sample = {
     feature: [...latestObservation.feature],
     target: getCurrentTarget(),
     createdAt: Date.now(),
-  });
-
-  const candidateSamples = calibrationModel?.samples
-    ? [...calibrationModel.samples, ...pendingSamples]
-    : [...pendingSamples];
-  const nextModel = fitModelFromSamples(candidateSamples);
+  };
+  const candidateSamples = [...(calibrationModel?.samples ?? []), ...pendingSamples, sample];
+  const nextModel = isValidSample(sample) ? fitModelFromSamples(candidateSamples) : null;
+  if (!isValidSample(sample) || (candidateSamples.length >= MIN_SAMPLES_FOR_MODEL && !nextModel)) {
+    setStatus("Capture rejected: samples could not produce a finite calibration. The active model and saved data were kept.");
+    return;
+  }
 
   if (nextModel) {
-    calibrationModel = {
-      ...nextModel,
-      samples: candidateSamples,
-    };
+    calibrationModel = { ...nextModel, samples: candidateSamples };
     pendingSamples = [];
+    smoothedPointer = null;
+  } else {
+    pendingSamples.push(sample);
   }
 
   const saved = saveCalibration();
@@ -732,7 +790,14 @@ const drawTracking = (results) => {
     return;
   }
 
-  const pointer = smoothPointer(predictCalibratedTarget(latestObservation));
+  const prediction = predictCalibratedTarget(latestObservation);
+  if (!prediction) {
+    clearPointer("Invalid prediction");
+    updateCalibrationUi();
+    setStatus("Pointing estimate was invalid; waiting for a valid hand observation.");
+    return;
+  }
+  const pointer = smoothPointer(prediction);
   confidenceEl.textContent = `${Math.round(pointer.confidence * 100)}%`;
   if (!previouslyObservedHand) {
     updateCalibrationUi();
@@ -876,7 +941,7 @@ const describeCameraError = (error) => {
   };
 };
 
-const startTracking = async () => {
+const startTracking = async (calibrationNotice = "") => {
   if (trackingState !== "stopped" && trackingState !== "error") return;
   const session = ++cameraSession;
 
@@ -942,19 +1007,18 @@ const startTracking = async () => {
   trackingState = "tracking";
   pointingStateEl.textContent = "No hand";
   updateCalibrationUi();
-  setStatus(
+  setStatus(calibrationNotice + (
     calibrationModel
       ? `Webcam ready. Loaded a calibrated model with ${calibrationModel.sampleCount} samples. Show one pointing hand.`
       : pendingSamples.length
         ? `Webcam ready. Loaded ${pendingSamples.length} pending captures. Resume calibration when ready.`
-        : "Webcam ready. Show one pointing hand, or start calibration to adapt the estimate to this setup.",
-  );
+        : "Webcam ready. Show one pointing hand, or start calibration to adapt the estimate to this setup."
+  ));
   predict(session);
 };
 
 const init = () => {
-  loadCalibration();
-  return startTracking();
+  return startTracking(loadCalibration());
 };
 
 cameraToggleButton.addEventListener("click", () => {

@@ -88,6 +88,12 @@ it without resuming tracking. Leaving the page also releases the active stream.
 
 **Copy Diagnostics** copies aggregate model information—sample counts, coverage and fit errors—to the clipboard. It does not copy webcam frames.
 
+Non-finite observations and failed numerical fits are rejected. A rejected capture
+keeps the active model and saved data. Invalid saved transforms are reported and
+rebuilt from valid retained samples when possible; otherwise prediction uses
+geometry until calibration succeeds. Finite fit diagnostics still do not establish
+real-world pointing accuracy.
+
 ## Privacy
 
 - Webcam frames are processed client-side by MediaPipe in the browser.
