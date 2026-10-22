@@ -49,9 +49,10 @@ async function openApp(page, options = {}) {
       callback(time);
     });
     Object.defineProperty(HTMLMediaElement.prototype, 'currentTime', {
-      get: () => performance.now() / 1000,
+      get: () => state.frozenVideoTime ?? performance.now() / 1000,
     });
     HTMLMediaElement.prototype.play = async () => {
+      if (state.playError) throw new DOMException('simulated playback failure', 'NotSupportedError');
       if (state.deferPlay) await new Promise(resolve => { state.resolvePlay = resolve; });
     };
     navigator.mediaDevices.getUserMedia = async (constraints) => {
@@ -249,6 +250,9 @@ test('tracker error releases the stream; retry preserves calibration samples', a
 
 for (const [name, options, expected] of [
   ['camera denial', { cameraError: 'NotAllowedError' }, 'Camera denied'],
+  ['camera security rejection', { cameraError: 'SecurityError' }, 'Camera denied'],
+  ['camera missing', { cameraError: 'NotFoundError' }, 'No camera'],
+  ['camera busy', { cameraError: 'NotReadableError' }, 'Camera busy'],
   ['model load failure', { loadError: true }, 'Load error'],
 ]) {
   test(`${name} shows recovery guidance and disables capture`, async ({ page }) => {
@@ -394,4 +398,75 @@ test('invalid saved transform is reported and replaced only by fresh valid calib
   const valid = await page.evaluate(key => JSON.parse(localStorage.getItem(key)), key);
   expect(valid.model.xCoefficients.every(Number.isFinite)).toBe(true);
   expect(valid.model.sampleCount).toBe(24);
+});
+
+
+test('interrupted camera input clears stale output and preserves calibration for restart', async ({ page }) => {
+  await openApp(page);
+  await expect(mode(page)).toHaveText('No hand');
+  await frame(page, [hand()]);
+  await page.getByRole('button', { name: 'Start Calibration', exact: true }).click();
+  await capture(page).click();
+  const stored = await page.evaluate(key => localStorage.getItem(key), key);
+  const drawn = await canvas(page);
+  await page.evaluate(() => {
+    const state = window.__handsTest;
+    state.frozenVideoTime = document.querySelector('#webcam').currentTime;
+    state.staleCallback = state.lastCallback;
+    const track = state.streams[0].track;
+    track.muted = true;
+    track.dispatchEvent(new Event('mute'));
+  });
+  await expect(capture(page)).toBeDisabled();
+  await expect(mode(page)).toHaveText('Camera stopped');
+  await expect(page.locator('#confidence')).toHaveText('0%');
+  await expect(page.locator('#hand-count')).toHaveText('0');
+  await expect(page.locator('#status')).toContainText('interrupted');
+  expect(await canvas(page)).not.toBe(drawn);
+  expect(await page.evaluate(() => window.__handsTest.streams[0].track.readyState)).toBe('ended');
+  expect(await page.evaluate(() => window.__handsTest.detectors[0].closed)).toBe(true);
+  expect(await page.evaluate(key => localStorage.getItem(key), key)).toBe(stored);
+  const detections = await page.evaluate(() => window.__handsTest.detections);
+  await page.evaluate(() => window.__handsTest.staleCallback(performance.now()));
+  expect(await page.evaluate(() => window.__handsTest.detections)).toBe(detections);
+  await page.evaluate(() => { window.__handsTest.frozenVideoTime = null; });
+  await page.getByRole('button', { name: 'Start Camera', exact: true }).click();
+  await expect(mode(page)).toHaveText('Geometry');
+  await page.evaluate(() => window.__handsTest.streams[0].track.dispatchEvent(new Event('ended')));
+  await expect(page.getByRole('button', { name: 'Stop Camera', exact: true })).toBeVisible();
+  await expect(samples(page)).toHaveText('1');
+  await page.getByRole('button', { name: 'Resume Calibration', exact: true }).click();
+  await capture(page).click();
+  await expect(samples(page)).toHaveText('2');
+});
+
+test('camera input interrupted during playback startup cannot revive the retired session', async ({ page }) => {
+  await openApp(page, { deferPlay: true });
+  await expect(mode(page)).toHaveText('Awaiting camera');
+  await page.evaluate(() => window.__handsTest.streams[0].track.dispatchEvent(new Event('mute')));
+  await expect(mode(page)).toHaveText('Camera stopped');
+  expect(await page.evaluate(() => window.__handsTest.streams[0].track.readyState)).toBe('ended');
+  await page.evaluate(() => { window.__handsTest.deferPlay = false; });
+  await page.getByRole('button', { name: 'Start Camera', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Stop Camera', exact: true })).toBeVisible();
+  await frame(page, [hand()]);
+  await page.evaluate(() => window.__handsTest.resolvePlay());
+  await expect(mode(page)).toHaveText('Geometry');
+  expect(await page.evaluate(() => window.__handsTest.streams.map(({ track }) => track.readyState))).toEqual(['ended', 'live']);
+});
+
+
+test('video playback rejection releases resources and retry uses a fresh stream', async ({ page }) => {
+  await openApp(page, { playError: true });
+  await expect(mode(page)).toHaveText('Error');
+  await expect(capture(page)).toBeDisabled();
+  await expect(page.locator('#confidence')).toHaveText('0%');
+  expect(await page.locator('#webcam').evaluate(video => video.srcObject)).toBe(null);
+  expect(await page.evaluate(() => window.__handsTest.streams[0].track.readyState)).toBe('ended');
+  expect(await page.evaluate(() => window.__handsTest.detectors[0].closed)).toBe(true);
+  await page.evaluate(() => { window.__handsTest.playError = false; });
+  await page.getByRole('button', { name: 'Start Camera', exact: true }).click();
+  await frame(page, [hand()]);
+  await expect(mode(page)).toHaveText('Geometry');
+  expect(await page.evaluate(() => window.__handsTest.streams.map(({ track }) => track.readyState))).toEqual(['ended', 'live']);
 });
