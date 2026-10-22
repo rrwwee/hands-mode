@@ -27,11 +27,14 @@ jobs:
     name: Browser workflow
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    container:
+      # Keep the image version aligned with @playwright/test in package.json.
+      image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:7852dc5a7d72f5fe458a597d690f6c42fbc8e9e26ddfa95f8e6ef552558d9bbf
+      options: --user 1001
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - run: npx playwright install --with-deps --only-shell chromium
       - run: npm run test:browser
