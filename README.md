@@ -51,6 +51,18 @@ the original independent-axis calculation and exercise capture, refit, reload,
 pending-sample controls and storage failures. They do not measure real-world
 pointing accuracy or replace browser/device testing.
 
+To run the real-browser workflow tests with synthetic landmarks:
+
+```sh
+npm ci --ignore-scripts
+npx playwright install --only-shell chromium
+npm run test:browser
+```
+
+These tests use an isolated headless browser with a local server and mocked
+MediaPipe/camera input. They do not request camera permission or download the
+hand model. CI runs them alongside the Node tests.
+
 ## Controls and calibration
 
 1. Load the page and allow webcam access when the browser asks.
@@ -58,6 +70,10 @@ pointing accuracy or replace browser/device testing.
 3. Select **Start Calibration**. Point at the pink target, then press <kbd>Space</kbd> or select **Capture Sample**.
 4. Repeat across the target positions. The calibrated mapping becomes active after 24 captures and is refitted after later captures.
 5. Select **Pause Calibration** when finished.
+
+Starting or resuming calibration focuses the pointing area. Space captures one
+sample per press there. Use Tab to reach the controls; while a button has focus,
+Space activates that button instead of capturing a sample.
 
 **Undo Pending** removes only the most recent sample that has not yet been included in a fitted model. **Clear Pending** removes all such pending samples. Neither action changes the active fitted model.
 

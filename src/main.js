@@ -503,6 +503,9 @@ const copyDiagnostics = async () => {
 const toggleCalibration = () => {
   isCalibrating = !isCalibrating;
   updateCalibrationUi();
+  if (isCalibrating) {
+    canvas.focus({ preventScroll: true });
+  }
   setStatus(
     isCalibrating
       ? "Point at the pink target and press Space or Capture Sample. You can pause anytime."
@@ -597,6 +600,9 @@ const resetCalibration = () => {
   smoothedPointer = null;
   isCalibrating = trackingState === "tracking";
   updateCalibrationUi();
+  if (isCalibrating) {
+    canvas.focus({ preventScroll: true });
+  }
   setStatus(
     isCalibrating
       ? "Calibration reset. Point at the pink target and press Space or Capture Sample."
@@ -881,8 +887,18 @@ const init = async () => {
 
 window.addEventListener("resize", resizeCanvas);
 window.addEventListener("keydown", (event) => {
-  if (event.code === "Space" && isCalibrating) {
-    event.preventDefault();
+  if (
+    event.code !== "Space" ||
+    !isCalibrating ||
+    event.defaultPrevented ||
+    event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
+    event.target?.closest?.("button, input, select, textarea, a[href], [contenteditable]")
+  ) {
+    return;
+  }
+
+  event.preventDefault();
+  if (!event.repeat) {
     captureSample();
   }
 });
