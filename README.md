@@ -37,6 +37,20 @@ Opening `index.html` directly is not supported: webcam access and JavaScript mod
 
 Browser and hardware combinations have not been tested comprehensively.
 
+## Tests
+
+With Node.js 22 or later installed, run:
+
+```sh
+node --test tests/*.test.mjs
+```
+
+The tests simulate browser APIs and hand observations without using a webcam,
+network connection or GPU. They compare the shared X/Y calibration solve against
+the original independent-axis calculation and exercise capture, refit, reload,
+pending-sample controls and storage failures. They do not measure real-world
+pointing accuracy or replace browser/device testing.
+
 ## Controls and calibration
 
 1. Load the page and allow webcam access when the browser asks.
