@@ -353,3 +353,45 @@ test('an ended camera track stops the session and allows restart', async ({ page
   await expect(page.getByRole('button', { name: 'Stop Camera', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Stop Camera', exact: true }).click();
 });
+
+test('non-finite landmarks cannot poison calibration and the next hand recovers', async ({ page }) => {
+  await openApp(page);
+  await expect(mode(page)).toHaveText('No hand');
+  await frame(page, [hand()]);
+  await page.getByRole('button', {name: 'Start Calibration', exact: true}).click();
+  await capture(page).click();
+  const stored = await page.evaluate(key => localStorage.getItem(key), key);
+  const invalid = hand();
+  invalid[8].x = NaN;
+  await frame(page, [invalid]);
+  await expect(mode(page)).toHaveText('Unclear');
+  await expect(page.locator('#confidence')).toHaveText('0%');
+  await expect(capture(page)).toBeDisabled();
+  await expect(samples(page)).toHaveText('1');
+  expect(await page.evaluate(key => localStorage.getItem(key), key)).toBe(stored);
+  await frame(page, [hand()]);
+  await capture(page).click();
+  await expect(samples(page)).toHaveText('2');
+});
+
+test('invalid saved transform is reported and replaced only by fresh valid calibration', async ({ page }) => {
+  await openApp(page);
+  await expect(mode(page)).toHaveText('No hand');
+  const invalid = JSON.stringify({model: {xCoefficients: Array(22).fill(null), yCoefficients: Array(22).fill(0), sampleCount: 24, meanError: 0, maxError: 0}, pendingSamples: []});
+  await page.evaluate(({key, invalid}) => localStorage.setItem(key, invalid), {key, invalid});
+  await page.reload({waitUntil: 'domcontentloaded'});
+  await expect(page.locator('#status')).toContainText(/invalid/i);
+  await frame(page, [hand()]);
+  await expect(mode(page)).toHaveText('Geometry');
+  expect(await page.evaluate(key => localStorage.getItem(key), key)).toBe(invalid);
+  await page.getByRole('button', {name: 'Start Calibration', exact: true}).click();
+  for (let i = 0; i < 24; i++) {
+    await frame(page, [hand((i % 5) * 0.02)]);
+    await capture(page).click();
+  }
+  await page.getByRole('button', {name: 'Pause Calibration', exact: true}).click();
+  await expect(mode(page)).toHaveText('Calibrated');
+  const valid = await page.evaluate(key => JSON.parse(localStorage.getItem(key)), key);
+  expect(valid.model.xCoefficients.every(Number.isFinite)).toBe(true);
+  expect(valid.model.sampleCount).toBe(24);
+});

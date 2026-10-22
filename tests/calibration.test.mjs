@@ -330,3 +330,136 @@ test("cancelled reset and storage failure retain data; confirmed reset clears it
   assert.equal(a.run("calibrationModel"), null);
   assert.equal(a.data.has(storageKey), false);
 });
+
+test('non-finite or incomplete landmarks are rejected and tracking can recover', async () => {
+  const a = await app();
+  a.context.hand = pointingHand();
+  a.run('toggleCalibration(); drawTracking({landmarks: [hand]})');
+  const first = a.json('latestObservation.feature');
+  for (const bad of [NaN, Infinity, -Infinity]) {
+    a.context.bad = bad;
+    a.run('hand[8].x = bad; drawTracking({landmarks: [hand]}); captureSample()');
+    assert.equal(a.run('latestObservation'), null);
+    assert.equal(a.run('smoothedPointer'), null);
+    assert.equal(a.elements.get('#capture-sample').disabled, true);
+    assert.equal(a.run('pendingSamples.length'), 0);
+  }
+  assert.equal(a.run('observeHand({landmarks: [[{x: 0, y: 0}]]})'), null);
+  a.context.hand = pointingHand();
+  a.run('drawTracking({landmarks: [hand]})');
+  assert.deepEqual(a.json('latestObservation.feature'), first);
+  assert.equal(a.elements.get('#capture-sample').disabled, false);
+  a.context.world = pointingHand();
+  a.context.world[8].z = Infinity;
+  assert.equal(a.run('observeHand({landmarks: [hand], worldLandmarks: [world]})'), null);
+});
+
+test('non-finite calibration samples and finite overflow cannot produce a model', async () => {
+  const a = await app();
+  for (const bad of [NaN, Infinity, -Infinity, 1e308]) {
+    a.context.input = samples(24);
+    a.context.input[0].feature[1] = bad;
+    assert.equal(a.run('fitModelFromSamples(input)'), null);
+  }
+  a.context.input = samples(24);
+  a.context.input[0].target.x = NaN;
+  assert.equal(a.run('fitModelFromSamples(input)'), null);
+});
+
+test('a rejected refit leaves the valid model, pending captures and saved bytes unchanged', async () => {
+  const a = await app();
+  a.context.input = samples(24);
+  a.run('calibrationModel = {...fitModelFromSamples(input), samples: input}; saveCalibration(); toggleCalibration()');
+  const before = a.json('calibrationModel');
+  const stored = a.data.get(storageKey);
+  a.context.badFeature = samples(1)[0].feature;
+  a.context.badFeature[1] = 1e308;
+  a.run('latestObservation = {feature: badFeature}; captureSample()');
+  assert.deepEqual(a.json('calibrationModel'), before);
+  assert.equal(a.run('pendingSamples.length'), 0);
+  assert.equal(a.data.get(storageKey), stored);
+  assert.match(a.elements.get('#status').textContent, /not accepted|rejected/i);
+});
+
+test('saved null or stale coefficients are rejected without dropping valid pending samples', async () => {
+  for (const coefficients of [Array(22).fill(null), [1, 2], Array(23).fill(0)]) {
+    const a = await app(JSON.stringify({
+      model: { xCoefficients: coefficients, yCoefficients: Array(22).fill(0), sampleCount: 24, meanError: 0, maxError: 0 },
+      pendingSamples: samples(2),
+    }));
+    assert.equal(a.run('calibrationModel'), null);
+    assert.equal(a.run('pendingSamples.length'), 2);
+    assert.match(a.elements.get('#status').textContent, /invalid|rejected/i);
+  }
+});
+
+test('invalid pending data does not replace a valid saved model', async () => {
+  const a = await app();
+  a.context.input = samples(24);
+  const model = a.json('({...fitModelFromSamples(input), samples: input})');
+  const pending = samples(2);
+  pending[0].feature[2] = null;
+  const loaded = await app(JSON.stringify({ model, pendingSamples: pending }));
+  assert.deepEqual(loaded.json('calibrationModel'), model);
+  assert.equal(loaded.run('pendingSamples.length'), 1);
+});
+
+test('near-degenerate finite inputs retain finite ridge-fit output', async () => {
+  const a = await app();
+  a.context.input = samples(24).map((sample, i) => ({...sample, feature: Array.from({length: 22}, (_, j) => j === 0 ? 1 : 0.5 + i * 1e-12)}));
+  const model = a.json('fitModelFromSamples(input)');
+  assert.ok(model.xCoefficients.every(Number.isFinite));
+  assert.ok(model.yCoefficients.every(Number.isFinite));
+  assert.ok(Number.isFinite(model.meanError));
+});
+
+test('first-fit resume retains samples once and refitting clears stale smoothing', async () => {
+  const a = await app(JSON.stringify({ samples: samples(24) }));
+  assert.equal(a.run('calibrationModel.sampleCount'), 24);
+  assert.equal(a.run('calibrationModel.samples.length'), 24);
+  assert.equal(a.run('pendingSamples.length'), 0);
+  assert.deepEqual(a.json('getCurrentTarget()'), {x: 0.92, y: 0.92});
+  a.context.hand = pointingHand();
+  a.run('drawTracking({landmarks: [hand]}); toggleCalibration(); captureSample()');
+  assert.equal(a.run('calibrationModel.sampleCount'), 25);
+  assert.equal(a.run('smoothedPointer'), null);
+});
+
+test('a non-finite prediction is not drawn and a valid observation can recover', async () => {
+  const a = await app();
+  a.context.hand = pointingHand();
+  a.run('calibrationModel = {xCoefficients: Array(22).fill(1e308), yCoefficients: Array(22).fill(0)}; drawTracking({landmarks: [hand]})');
+  assert.equal(a.elements.get('#pointing-state').textContent, 'Invalid prediction');
+  assert.equal(a.run('latestObservation'), null);
+  assert.equal(a.run('smoothedPointer'), null);
+  assert.equal(a.elements.get('#capture-sample').disabled, true);
+  a.run('calibrationModel = null; drawTracking({landmarks: [hand]})');
+  assert.equal(a.elements.get('#pointing-state').textContent, 'Geometry');
+});
+
+test('an invalid cached transform is rebuilt from its retained valid training samples', async () => {
+  const retained = samples(24);
+  const stored = JSON.stringify({model: {xCoefficients: [null], yCoefficients: [null], sampleCount: 24, samples: retained}, pendingSamples: []});
+  const a = await app(stored);
+  assert.equal(a.run('calibrationModel.sampleCount'), 24);
+  assert.deepEqual(a.json('calibrationModel.samples'), retained);
+  assert.equal(a.run('pendingSamples.length'), 0);
+  assert.match(a.elements.get('#status').textContent, /rebuilt/);
+  assert.equal(a.data.get(storageKey), stored);
+});
+
+test('intermediate solver overflow is rejected even if final coefficients might appear finite', async () => {
+  const a = await app();
+  assert.throws(() => a.run('solveLinearSystem([[1e308,1e308],[-1e308,1e308]], [[1,2],[3,4]])'), /unstable/);
+});
+
+test('near-threshold finger geometry stays finite, while missing and null coordinates are rejected', async () => {
+  const a = await app();
+  a.context.hand = pointingHand();
+  a.run('hand[8] = {...hand[7], x: hand[7].x + 0.0059}');
+  assert.equal(a.run('observeHand({landmarks:[hand]})'), null);
+  a.run('hand[8].x = hand[7].x + 0.0061');
+  assert.ok(a.json('observeHand({landmarks:[hand]}).feature').every(Number.isFinite));
+  a.run('hand[8].z = null');
+  assert.equal(a.run('observeHand({landmarks:[hand]})'), null);
+});
