@@ -443,6 +443,13 @@ const getCurrentTarget = () =>
   calibrationTargets[(getAcceptedSampleCount() + pendingSamples.length) % calibrationTargets.length];
 
 const updateCalibrationUi = () => {
+  if (trackingState === "tracking" && latestObservation) {
+    pointingStateEl.textContent = isCalibrating
+      ? "Calibrating"
+      : calibrationModel
+        ? "Calibrated"
+        : "Geometry";
+  }
   sampleCountEl.textContent = calibrationModel
     ? pendingSamples.length
       ? `${calibrationModel.sampleCount}+${pendingSamples.length}`
@@ -495,13 +502,6 @@ const copyDiagnostics = async () => {
 
 const toggleCalibration = () => {
   isCalibrating = !isCalibrating;
-  if (latestObservation) {
-    pointingStateEl.textContent = isCalibrating
-      ? "Calibrating"
-      : calibrationModel
-        ? "Calibrated"
-        : "Geometry";
-  }
   updateCalibrationUi();
   setStatus(
     isCalibrating
@@ -596,9 +596,6 @@ const resetCalibration = () => {
   calibrationModel = null;
   smoothedPointer = null;
   isCalibrating = trackingState === "tracking";
-  if (latestObservation) {
-    pointingStateEl.textContent = isCalibrating ? "Calibrating" : "Geometry";
-  }
   updateCalibrationUi();
   setStatus(
     isCalibrating
@@ -692,6 +689,13 @@ const drawPointer = (prediction, screenRect) => {
   ctx.restore();
 };
 
+const clearPointer = (mode) => {
+  latestObservation = null;
+  smoothedPointer = null;
+  pointingStateEl.textContent = mode;
+  confidenceEl.textContent = "0%";
+};
+
 const drawTracking = (results) => {
   const { width, height } = resizeCanvas();
   const screenRect = getScreenRect(width, height);
@@ -707,9 +711,7 @@ const drawTracking = (results) => {
   }
 
   if (!latestObservation) {
-    smoothedPointer = null;
-    pointingStateEl.textContent = hands.length ? "Unclear" : "No hand";
-    confidenceEl.textContent = "0%";
+    clearPointer(hands.length ? "Unclear" : "No hand");
     if (previouslyObservedHand) {
       updateCalibrationUi();
     }
@@ -717,11 +719,6 @@ const drawTracking = (results) => {
   }
 
   const pointer = smoothPointer(predictCalibratedTarget(latestObservation));
-  pointingStateEl.textContent = isCalibrating
-    ? "Calibrating"
-    : calibrationModel
-      ? "Calibrated"
-      : "Geometry";
   confidenceEl.textContent = `${Math.round(pointer.confidence * 100)}%`;
   if (!previouslyObservedHand) {
     updateCalibrationUi();
@@ -739,10 +736,11 @@ const predict = () => {
   } catch (error) {
     console.error(error);
     trackingState = "error";
-    latestObservation = null;
-    pointingStateEl.textContent = "Error";
+    clearPointer("Error");
+    handCountEl.textContent = "0";
     updateCalibrationUi();
     setStatus(`Hand tracking stopped: ${error.message}. Reload the page to try again.`);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     return;
   }
 
