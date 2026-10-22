@@ -13,7 +13,12 @@ const storageKey = "hands-mode.calibration.v2";
 async function app(saved) {
   const data = new Map(saved ? [[storageKey, saved]] : []);
   const elements = new Map();
-  const drawing = new Proxy({}, { get: () => () => {} });
+  const drawCalls = [];
+  const drawingErrors = new Map();
+  const drawing = new Proxy({}, { get: (_, method) => () => {
+    drawCalls.push(method);
+    if (drawingErrors.has(method)) throw drawingErrors.get(method);
+  } });
   const context = vm.createContext({
     console: { log() {}, error() {} },
     performance: { now: () => 1 },
@@ -46,7 +51,7 @@ async function app(saved) {
   vm.runInContext(source, context);
   await context.ready;
   return {
-    data, elements, context,
+    data, elements, context, drawCalls, drawingErrors,
     run: (code) => vm.runInContext(code, context),
     json: (code) => JSON.parse(vm.runInContext(`JSON.stringify(${code})`, context)),
   };
@@ -62,6 +67,17 @@ function samples(count, outlier = false) {
       target: { x: outlier && i === 2 ? 4 : 0.1 + 0.8 * x, y: 0.2 + 0.6 * y },
     };
   });
+}
+
+function pointingHand(xOffset = 0) {
+  const hand = Array.from({ length: 21 }, () => ({ x: 0.5 + xOffset, y: 0.7, z: 0 }));
+  Object.assign(hand, {
+    0: { x: 0.5 + xOffset, y: 0.85, z: 0 },
+    6: { x: 0.47 + xOffset, y: 0.55, z: 0 },
+    7: { x: 0.45 + xOffset, y: 0.42, z: 0 },
+    8: { x: 0.43 + xOffset, y: 0.3, z: 0 },
+  });
+  return hand;
 }
 
 // Frozen scalar-axis reference from the original implementation. This remains
@@ -181,13 +197,7 @@ test("no hand cannot capture; geometry fallback and calibrated bounds remain", a
 
 test("synthetic landmarks enable capture; losing the hand disables it", async () => {
   const a = await app();
-  a.context.hand = Array.from({ length: 21 }, () => ({ x: 0.5, y: 0.7, z: 0 }));
-  Object.assign(a.context.hand, {
-    0: { x: 0.5, y: 0.85, z: 0 },
-    6: { x: 0.47, y: 0.55, z: 0 },
-    7: { x: 0.45, y: 0.42, z: 0 },
-    8: { x: 0.43, y: 0.3, z: 0 },
-  });
+  a.context.hand = pointingHand();
   a.run("toggleCalibration(); drawTracking({landmarks: [hand]})");
   assert.equal(a.elements.get("#capture-sample").disabled, false);
   assert.equal(a.elements.get("#pointing-state").textContent, "Calibrating");
@@ -198,6 +208,80 @@ test("synthetic landmarks enable capture; losing the hand disables it", async ()
   assert.equal(a.run("pendingSamples.length"), 1);
   assert.equal(a.elements.get("#capture-sample").disabled, true);
   assert.equal(a.elements.get("#pointing-state").textContent, "No hand");
+});
+
+test("two-hand results use only the first reported hand, without fallback", async () => {
+  const a = await app();
+  a.context.first = pointingHand();
+  a.context.second = pointingHand(0.2);
+  a.context.unclear = Array.from({ length: 21 }, () => ({ x: 0.5, y: 0.5, z: 0 }));
+  const first = a.json("observeHand({landmarks: [first]})");
+  assert.deepEqual(a.json("observeHand({landmarks: [first, second]})"), first);
+  const second = a.json("observeHand({landmarks: [second]})");
+  assert.deepEqual(a.json("observeHand({landmarks: [second, first]})"), second);
+  assert.notDeepEqual(first.feature, second.feature);
+  a.run("toggleCalibration(); drawTracking({landmarks: [first, second]}); captureSample()");
+  assert.equal(a.elements.get("#hand-count").textContent, "2");
+  a.run("drawTracking({landmarks: [unclear, second]}); captureSample()");
+  assert.equal(a.run("pendingSamples.length"), 1);
+  assert.equal(a.run("latestObservation"), null);
+  assert.equal(a.run("smoothedPointer"), null);
+  assert.equal(a.elements.get("#capture-sample").disabled, true);
+  assert.equal(a.elements.get("#pointing-state").textContent, "Unclear");
+  assert.equal(a.elements.get("#confidence").textContent, "0%");
+  a.run("drawTracking({landmarks: [second]})");
+  assert.equal(a.run("smoothedPointer.x"), a.run("latestObservation.raw.x"));
+  assert.equal(a.run("smoothedPointer.y"), a.run("latestObservation.raw.y"));
+  assert.equal(a.elements.get("#capture-sample").disabled, false);
+});
+
+test("mode follows calibration state even between video frames", async () => {
+  const a = await app();
+  a.context.hand = pointingHand();
+  a.run("drawTracking({landmarks: [hand]})");
+  assert.equal(a.elements.get("#pointing-state").textContent, "Geometry");
+  a.run("toggleCalibration()");
+  assert.equal(a.elements.get("#pointing-state").textContent, "Calibrating");
+  a.run("calibrationModel = {sampleCount: 24, meanError: 0, maxError: 0}; toggleCalibration()");
+  assert.equal(a.elements.get("#pointing-state").textContent, "Calibrated");
+  a.run("resetCalibration()");
+  assert.equal(a.elements.get("#pointing-state").textContent, "Calibrating");
+  a.run("toggleCalibration()");
+  assert.equal(a.elements.get("#pointing-state").textContent, "Geometry");
+});
+
+test("tracking errors clear stale confidence and pointer and prevent capture", async () => {
+  const a = await app();
+  a.context.hand = pointingHand();
+  a.run("toggleCalibration(); drawTracking({landmarks: [hand]})");
+  assert.notEqual(a.elements.get("#confidence").textContent, "0%");
+  assert.notEqual(a.run("smoothedPointer"), null);
+  a.drawCalls.length = 0;
+  a.run('video.currentTime = 1; handLandmarker.detectForVideo = () => { throw new Error("lost tracker"); }; predict(); captureSample()');
+  assert.equal(a.run("latestObservation"), null);
+  assert.equal(a.run("smoothedPointer"), null);
+  assert.equal(a.elements.get("#confidence").textContent, "0%");
+  assert.equal(a.elements.get("#pointing-state").textContent, "Error");
+  assert.equal(a.elements.get("#hand-count").textContent, "0");
+  assert.ok(a.drawCalls.includes("clearRect"), "the stale pointer canvas must be cleared");
+  assert.equal(a.elements.get("#capture-sample").disabled, true);
+  assert.equal(a.run("pendingSamples.length"), 0);
+});
+
+test("drawing failure also stops capture without re-entering drawing", async () => {
+  const a = await app();
+  a.context.hand = pointingHand();
+  a.run("toggleCalibration(); drawTracking({landmarks: [hand]})");
+  a.drawCalls.length = 0;
+  a.drawingErrors.set("fillRect", new Error("drawing failed"));
+  a.run("video.currentTime = 1; handLandmarker.detectForVideo = () => ({landmarks: [hand]}); predict(); captureSample()");
+  assert.equal(a.run("latestObservation"), null);
+  assert.equal(a.run("smoothedPointer"), null);
+  assert.equal(a.run("pendingSamples.length"), 0);
+  assert.equal(a.elements.get("#capture-sample").disabled, true);
+  assert.equal(a.elements.get("#pointing-state").textContent, "Error");
+  assert.equal(a.drawCalls.filter((call) => call === "fillRect").length, 1);
+  assert.ok(a.drawCalls.includes("clearRect"));
 });
 
 test("undo/clear pending retain the active model, including after reload", async () => {
