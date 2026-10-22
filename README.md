@@ -81,6 +81,8 @@ Use **Start Camera** to restart, including after a tracking or camera error.
 During startup, **Cancel Camera Start** cancels this app's pending start. A browser
 permission prompt may remain open; if its stream arrives later, the app releases
 it without resuming tracking. Leaving the page also releases the active stream.
+If the camera source stops providing input (including a temporary interruption),
+tracking stops and clears the old pointer; select **Start Camera** to reconnect with calibration retained.
 
 **Undo Pending** removes only the most recent sample that has not yet been included in a fitted model. **Clear Pending** removes all such pending samples. Neither action changes the active fitted model.
 

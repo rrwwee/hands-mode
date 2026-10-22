@@ -883,11 +883,14 @@ const startCamera = async (session) => {
   }
   video.srcObject = stream;
   for (const track of stream.getTracks()) {
-    track.addEventListener("ended", () => {
+    const stopForLostInput = (event) => {
       if (session === cameraSession) {
-        endCameraSession("stopped", "Camera stopped", "Camera stream ended. Select Start Camera to reconnect. Calibration kept.");
+        const reason = event.type === "mute" ? "Camera input interrupted." : "Camera stream ended.";
+        endCameraSession("stopped", "Camera stopped", `${reason} Select Start Camera to reconnect. Calibration kept.`);
       }
-    }, { once: true });
+    };
+    track.addEventListener("ended", stopForLostInput, { once: true });
+    track.addEventListener("mute", stopForLostInput, { once: true });
   }
   await video.play();
   if (session !== cameraSession) {
