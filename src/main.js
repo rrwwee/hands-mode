@@ -396,6 +396,7 @@ const fitModelFromSamples = (samples) => {
 
   let weights = samples.map(() => 1);
   let model = null;
+  let errors;
 
   for (let pass = 0; pass < 4; pass += 1) {
     try {
@@ -404,19 +405,16 @@ const fitModelFromSamples = (samples) => {
       return null;
     }
 
-    const errors = samples.map((sample) => {
+    errors = samples.map((sample) => {
       const prediction = predictWithModel(sample.feature, model);
       return Math.hypot(prediction.x - sample.target.x, prediction.y - sample.target.y);
     });
     if (!errors.every(Number.isFinite)) return null;
-    const typicalError = Math.max(median(errors), 0.025);
-    weights = errors.map((error) => 1 / (1 + (error / (typicalError * 2)) ** 2));
+    if (pass < 3) {
+      const typicalError = Math.max(median(errors), 0.025);
+      weights = errors.map((error) => 1 / (1 + (error / (typicalError * 2)) ** 2));
+    }
   }
-
-  const errors = samples.map((sample) => {
-    const prediction = predictWithModel(sample.feature, model);
-    return Math.hypot(prediction.x - sample.target.x, prediction.y - sample.target.y);
-  });
 
   const fitted = {
     ...model,
